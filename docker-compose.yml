@@ -1,0 +1,21 @@
+services:
+  iptv-crawler:
+    build: .
+    container_name: iptv-crawler
+    image: iptv-crawler:latest
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=Asia/Shanghai
+    restart: always
+
+  # 把生成的 m3u 挂成网页, 供 iptv 后台/电视订阅
+  m3u-server:
+    image: nginx:alpine
+    container_name: m3u-server
+    ports:
+      - "8899:80"        # 左边是群晖端口, 被占用就改成别的
+    volumes:
+      - ./data/output:/usr/share/nginx/html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: always

@@ -1,0 +1,2 @@
+# 每5天凌晨04:00执行一次 (day-of-month 1,6,11,16,21,26,31)
+0 4 */5 * * root /usr/local/bin/python /app/main.py >> /proc/1/fd/1 2>&1
