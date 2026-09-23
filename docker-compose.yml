@@ -1,10 +1,11 @@
 services:
   iptv-crawler:
-    build: .
+    # 不再build, 直接用本机已有镜像 iptv-crawler:latest (main.py由下方挂载覆盖, 镜像内旧代码无关紧要)
     container_name: iptv-crawler
     image: iptv-crawler:latest
     volumes:
       - ./data:/data
+      - ./main.py:/app/main.py    # 宿主机main.py覆盖镜像内旧文件: 以后改代码只需替换此文件并重启容器
     environment:
       - TZ=Asia/Shanghai
     restart: always

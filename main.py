@@ -6,8 +6,6 @@ IPTV 组播源爬取器 (Docker 无头版) v1.0
   - 每次运行: 先复测旧IP -> 可播不足目标再爬 FOFA -> 每省凑够 target 个可播即收工
   - 导出每省 m3u 到 /data/output, 运行摘要写入 /data/output/status.json
   - 日志 /data/logs/crawl.log (轮转 3 份 x 5MB), 同时输出到容器标准输出
-
-★ FOFA 账号适配(免费版开箱即用, 付费会员见下方"FOFA 账号适配区")★
 """
 import os, re, json, time, base64, datetime, shutil, logging, threading, random, hashlib
 from logging.handlers import RotatingFileHandler
@@ -41,7 +39,7 @@ log = logger.info
 # ---------------- 配置 ----------------
 DEFAULT_CONFIG = {
     "provinces": ["上海", "湖南", "安徽"],   # 要处理的省份
-    "target_alive_per_province": 5,          # 每省凑够多少个可播IP即收工
+    "target_alive_per_province": 4,          # 每省凑够多少个可播IP即收工(2026-09-23由5改为4)
     "skip_if_alive": 2,                      # 复测后仍有这么多个可播 -> 直接收工不爬FOFA
     "rounds": 4,                             # 不足目标时, FOFA 最多爬几轮
     "telecom_only": True,                    # 仅电信ASN (FOFA查询条件)
@@ -90,19 +88,7 @@ QUOTA_MARKERS = ["查询次数", "数据额度", "已达上限", "额度不足",
 # 中国电信核心ASN (骨干+集团)
 CORE_ASNS = ["4134", "4809", "23724", "4811", "4812", "4813", "4816", "4835"]
 
-# ┌──────────────────────────────────────────────────────────────┐
-# │ ★ FOFA 账号适配区 ★  (付费会员主要改这里)                        │
-# │                                                              │
-# │ MIN_QUERY_GAP: 免费版限流严格, 相邻查询最小间隔 50 秒;          │
-# │   付费会员额度宽限流松, 可降到 5~10, 整体运行时间大幅缩短。      │
-# │                                                              │
-# │ 搜索广度: 改 data/config.json 的 rounds (免费版建议≤4,          │
-# │   会员可调到 8 扩大端口/页面覆盖); provinces/target 同理。        │
-# │                                                              │
-# │ 额度观察: 运行日志出现 "FOFA可能已限流/额度耗尽" 即当月额度     │
-# │   用完, 等下月重置或升级会员。                                  │
-# └──────────────────────────────────────────────────────────────┘
-MIN_QUERY_GAP = 50   # FOFA限流: 相邻查询最小间隔(秒) | 会员可改 5~10
+MIN_QUERY_GAP = 50   # FOFA限流: 相邻查询最小间隔(秒)
 
 UDPXY_PORTS = ["4022", "8888", "4000", "8000", "8881", "9000", "7000", "5555",
                "8899", "8883", "8686", "8088", "10000", "8800", "8118", "6868"]
@@ -182,7 +168,8 @@ def deep_check(ip, groups, log_fn=log, fast=False, t_limit=None):
     for _, chs in groups:
         for name, suffix in chs:
             n = name.replace("-", "").replace(" ", "").lower()
-            if "cctv1" in n and "综合" not in n:
+            # cctv1后不能紧跟数字, 防止cctv10/11/12误命中; 带"综合"的跳过
+            if re.search(r"cctv1(?!\d)", n) and "综合" not in n:
                 cctv1 = (name, suffix); break
         if cctv1:
             break
@@ -560,6 +547,8 @@ def run_province(prov, cfg, st):
 
 # ---------------- 导出 ----------------
 def export_province(prov, st, target=5):
+    """每个频道 × 全部可播IP 全组合导出: 同一组播地址依次挂上每个可播IP,
+    按速度从快到慢排列, 播放器可自动/手动换下一个IP重试"""
     groups = _TPL_CACHE.get(prov) or load_template(prov)
     ips = st.get(prov, {}).get("ips", [])
     good = [i for i in ips if i["status"] == "可播"]
@@ -570,25 +559,22 @@ def export_province(prov, st, target=5):
         log("  %s: 模板未加载, 不导出", prov)
         return 0
     good.sort(key=lambda x: -(x.get("speed") if isinstance(x.get("speed"), (int, float)) else 0))
-    good = good[:target]   # 只取速度最快的前target个, 不足则有几个用几个
-    gi = 0
-    used = set()
+    # target只是爬取下限(凑够即停), 导出时不截断: 池里全部可播IP都挂上
+    n_ch = sum(len(c) for _, c in groups)
     got_groups = []
     for gname, chs in groups:
         got = []
         for name, suffix in chs:
-            info = good[gi % len(good)]   # 按频道逐个轮换IP, 与模板分组结构无关
-            used.add(info["ip"])
-            gi += 1
-            okp = info.get("okpath") if isinstance(info.get("okpath"), str) else None
-            got.append((name, _rewrite_url(info["ip"], suffix, okp)))
+            for info in good:   # 同一频道依次挂全部可播IP, 地址不变
+                okp = info.get("okpath") if isinstance(info.get("okpath"), str) else None
+                got.append((name, _rewrite_url(info["ip"], suffix, okp)))
         got_groups.append((gname, got))
     lines = _render("m3u", got_groups)
     out = os.path.join(OUTPUT_DIR, f"{prov}.m3u")
     with open(out, "w", encoding="utf-8") as f:
         f.write("#EXTM3U\n" + "\n".join(lines) + "\n")
     n = _count("m3u", lines)
-    log("  导出 %s: %d 频道, 轮换 %d 个可播IP", out, n, len(used))
+    log("  导出 %s: %d 频道 × 全部%d个可播IP = %d 条地址", out, n_ch, len(good), n)
     return n
 
 # ---------------- 主流程 ----------------
