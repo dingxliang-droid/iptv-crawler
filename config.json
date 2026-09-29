@@ -2,9 +2,11 @@
   "provinces": [
     "上海",
     "湖南",
-    "安徽"
+    "安徽",
+    "四川",
+    "广东"
   ],
-  "target_alive_per_province": 5,
+  "target_alive_per_province": 4,
   "rounds": 4,
   "telecom_only": true,
   "skip_if_alive": 2
