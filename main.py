@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-IPTV 组播源爬取器 (Docker 无头版) v1.0
+IPTV 组播源爬取器 (Docker 无头版) v1.2.1 (2026-09-29)
+v1.1.0: 导出改为"频道x全部可播IP"全组合; target默认5->4; 修复cctv1误匹配cctv10
+v1.2.0: 端口列表按实测命中率重排; FOFA诊断连续失败全局熔断, 后续省不再空爬
+v1.2.1: FOFA查询间隔与失败重试等待改为随机化(50~80s/40~70s), 避免固定节奏触发风控
 由 iptv源管理_v3.4.6 GUI 版改造:
   - 去掉 tkinter, 配置由 /data/config.json 驱动
   - 每次运行: 先复测旧IP -> 可播不足目标再爬 FOFA -> 每省凑够 target 个可播即收工
@@ -13,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from dotenv import load_dotenv
 
+VERSION      = "v1.2.1 (2026-09-29)"
 DATA_DIR     = "/data"
 CONFIG_FILE  = os.path.join(DATA_DIR, "config.json")
 ENV_FILE     = os.path.join(DATA_DIR, ".env")
@@ -88,10 +92,13 @@ QUOTA_MARKERS = ["查询次数", "数据额度", "已达上限", "额度不足",
 # 中国电信核心ASN (骨干+集团)
 CORE_ASNS = ["4134", "4809", "23724", "4811", "4812", "4813", "4816", "4835"]
 
-MIN_QUERY_GAP = 50   # FOFA限流: 相邻查询最小间隔(秒)
+MIN_QUERY_GAP = 50   # FOFA限流: 相邻查询最小间隔基数(秒), 实际间隔50~80随机, 避免固定节奏被风控识别
+FOFA_DEAD = {"v": False}   # 本次运行内FOFA诊断连续失败->全局熔断, 后续省份不再爬, 只复测导出
 
-UDPXY_PORTS = ["4022", "8888", "4000", "8000", "8881", "9000", "7000", "5555",
-               "8899", "8883", "8686", "8088", "10000", "8800", "8118", "6868"]
+# 按日志实证命中率排序(2026-09-29): 前3个会被rounds=4的第2/3/4轮依次使用
+UDPXY_PORTS = ["4022", "8888", "4000",        # 主力: udpxy默认口/路由器默认口/三省实证
+               "9000", "7000", "8118", "9999",  # 实证可播备用(加大rounds时启用)
+               "8686", "8088", "6868", "5555", "8000"]  # 社区常见长尾
 
 # ---------------- FOFA ----------------
 def _fofa_page(sess, query, page, log_fn=log):
@@ -106,7 +113,9 @@ def _fofa_page(sess, query, page, log_fn=log):
              if not ip.startswith(("0.", "127.", "255."))]
     return found
 
-def _query_retry(sess, q, log_fn=log, wait=45):
+def _query_retry(sess, q, log_fn=log, wait=None):
+    if wait is None:
+        wait = 40 + random.randint(0, 30)   # 40~70秒随机, 避免固定重试节奏
     found = []
     for attempt in range(2):
         try:
@@ -461,6 +470,8 @@ def run_province(prov, cfg, st):
     # ---- 3) 不足目标 -> 爬 FOFA ----
     if alive >= skip_min:
         log("  复测仍有 %d 个可播 (≥%d), 旧IP够用, 跳过 FOFA 爬取", alive, skip_min)
+    elif FOFA_DEAD["v"]:
+        log("  本次运行FOFA已熔断(前面省份诊断失败), 跳过爬取, 仅复测导出")
     else:
         zh = PROVINCES[prov]
         sess = requests.Session()
@@ -478,7 +489,7 @@ def run_province(prov, cfg, st):
                 q = 'udpxy && region="%s"' % zh
             if port:
                 q += ' && port="%s"' % port
-            gap = MIN_QUERY_GAP - (time.time() - last_query)
+            gap = (MIN_QUERY_GAP + random.randint(0, 30)) - (time.time() - last_query)
             if gap > 0:
                 log("  等待 %.0f 秒(FOFA限流间隔)...", gap)
                 time.sleep(gap)
@@ -489,7 +500,8 @@ def run_province(prov, cfg, st):
                 if _diagnose(sess, log) is None:
                     diag_fail += 1
                     if diag_fail >= 2:
-                        log("连续2轮诊断失败, cookie大概率失效, 中止本省份")
+                        log("连续2轮诊断失败, cookie大概率失效, 中止本省份并熔断本次运行")
+                        FOFA_DEAD["v"] = True
                         break
                     log("  诊断未通过(可能限流窗口), 继续下一轮")
                     continue
@@ -581,7 +593,7 @@ def export_province(prov, st, target=5):
 def main():
     t0 = time.time()
     log("=" * 56)
-    log("IPTV 组播源爬取器(无头版) 开始运行")
+    log("IPTV 组播源爬取器(无头版) %s 开始运行", VERSION)
     cfg = load_config()
     log("配置: %s", cfg)
     summary = {}
